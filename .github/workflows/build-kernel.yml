@@ -1,93 +1,106 @@
-name: Build Xiaomi odin Kernel
+name: Build Xiaomi Mix 4 (odin) QGKI Kernel
 
 on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "defconfig 文件名（位于 arch/arm64/configs/ 下）"
+        description: "Defconfig 文件名"
         required: true
         default: "odin_defconfig"
       ndk_version:
-        description: "Android NDK 版本号（对应 GitHub Releases 的 tag，如 r29、r28c）"
+        description: "Android NDK 版本 (tag, 如 r29)"
         required: true
         default: "r29"
   push:
     branches:
+      - main
       - lineage-23.2
     paths:
       - "arch/arm64/configs/odin_defconfig"
-      - ".github/workflows/build-kernel.yml"
+      - ".github/workflows/build-odin-kernel.yml"
 
 env:
-  KERNEL_DIR: kernel
-  NDK_DIR: ndk
-  OUT_DIR: out
-  ARCH: arm64
-  SUBARCH: arm64
-  NDK_VERSION: r29
+  # 设备专属标识
+  DEVICE_CODENAME: "odin"
+  DEVICE_NAME: "Xiaomi Mix 4"
+  
+  # 编译路径与架构
+  KERNEL_DIR: "kernel"
+  OUT_DIR: "out"
+  ARCH: "arm64"
+  SUBARCH: "arm64"
+  
+  # 工具链（使用官方 NDK）
+  NDK_VERSION: "r29"
+  
+  # 【打包核心】直接硬编码为全内联模式（Odin 的 QGKI 特性）
+  PACK_METHOD: "Anykernel3"
+  AK3_REPO: "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_BRANCH: "master"
 
 jobs:
   build:
-    name: Build kernel (${{ github.event.inputs.defconfig || 'odin_defconfig' }})
+    name: 编译 Odin 内核 (QGKI 5.4)
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
-      - name: Free up disk space
+      # 1. 释放磁盘空间（避免 GitHub  Runner 空间不足）
+      - name: 释放磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
-            /opt/ghc /opt/hostedtoolcache/CodeQL \
-            /usr/local/.ghcup /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo docker system prune -af || true
           df -h /
 
-      - name: Checkout kernel source (depth=1)
+      # 2. 检出内核源码
+      - name: 检出内核源码 (depth=1)
         uses: actions/checkout@v4
         with:
           path: ${{ env.KERNEL_DIR }}
           fetch-depth: 1
 
-      - name: Install build dependencies
+      # 3. 安装编译依赖
+      - name: 安装编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git bc bison flex libelf-dev libssl-dev libncurses-dev \
             build-essential zip unzip curl device-tree-compiler \
-            python3 rsync
+            python3 rsync p7zip-full
 
-      - name: Download Android NDK (${{ github.event.inputs.ndk_version || env.NDK_VERSION }})
+      # 4. 下载 Android NDK (Clang 工具链)
+      - name: 下载 Android NDK (${{ github.event.inputs.ndk_version || env.NDK_VERSION }})
         env:
-          # 改用 Android NDK 官方 GitHub Releases 对应的 dl.google.com 直链下载完整包，
-          # 这是 Google 官方稳定发布、版本号明确、可反复验证的下载方式，
-          # 不依赖 AOSP 内部仓库的分支/目录结构（之前在那上面踩过坑）。
-          # 参考: https://github.com/android/ndk/releases
           NDK_VER: ${{ github.event.inputs.ndk_version || env.NDK_VERSION }}
         run: |
-          url="https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
-          echo "Downloading: $url"
-          curl -fL --retry 3 -o ndk.zip "$url"
+          URL="https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
+          echo "下载地址: $URL"
+          curl -fL --retry 3 -o ndk.zip "$URL"
           unzip -q ndk.zip
           rm -f ndk.zip
-          # 解压后目录名固定为 android-ndk-<版本号>，统一重命名方便后续引用
-          mv "android-ndk-${NDK_VER}" "${{ env.NDK_DIR }}"
-          CLANG_BIN="${{ github.workspace }}/${{ env.NDK_DIR }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "$CLANG_BIN" >> "$GITHUB_PATH"
-          du -sh "${{ env.NDK_DIR }}"
+          # 统一重命名为 ndk 目录
+          mv "android-ndk-${NDK_VER}" ndk
+          # 添加 Clang 到 PATH
+          CLANG_PATH="${{ github.workspace }}/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$CLANG_PATH" >> "$GITHUB_PATH"
+          echo "NDK 大小:"
+          du -sh ndk
 
-      - name: Show toolchain version
+      - name: 验证 Clang 版本
         run: clang --version
 
-      - name: Prepare output directory
-        run: mkdir -p "${{ env.OUT_DIR }}"
+      # 5. 创建输出目录
+      - name: 准备输出目录
+        run: mkdir -p "${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}"
 
-      - name: Generate defconfig
+      # 6. 生成 defconfig
+      - name: 生成 defconfig
         working-directory: ${{ env.KERNEL_DIR }}
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig || 'odin_defconfig' }}
         run: |
           make -j"$(nproc)" \
-            O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
+            O="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
             SUBARCH="${{ env.SUBARCH }}" \
             HOSTCC=clang \
@@ -95,31 +108,89 @@ jobs:
             LLVM_IAS=1 \
             "$DEFCONFIG"
 
-      - name: Build kernel
+      # 7. 编译内核 (Image, dtb 等)
+      - name: 编译内核
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           make -j"$(nproc)" \
-            O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
+            O="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
             SUBARCH="${{ env.SUBARCH }}" \
             LLVM=1 \
             LLVM_IAS=1 \
             2>&1 | tee "${{ github.workspace }}/build.log"
 
-      - name: Collect build artifacts
+      # 7.5 诊断：查看编译产物，确认是否需要打包 dtbo 和 .ko 模块
+      - name: 诊断编译产物
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          mkdir -p artifacts
-          find "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot" \
-            -maxdepth 2 \
-            \( -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' \) \
-            -exec cp -v {} artifacts/ \; || true
-          cp -v build.log artifacts/ || true
-          du -sh artifacts/
+          echo "===== out/arch/arm64/boot/ 目录内容 ====="
+          ls -la "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/" || echo "目录不存在"
+          
+          echo ""
+          echo "===== 是否存在 dtbo.img ====="
+          find "${{ env.OUT_DIR }}" -iname "dtbo*" 2>/dev/null || echo "未找到 dtbo 相关文件"
+          
+          echo ""
+          echo "===== 是否存在独立 dtb 文件 ====="
+          find "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot" -iname "*.dtb" 2>/dev/null | head -20
+          
+          echo ""
+          echo "===== 编译出的 .ko 模块数量 ====="
+          find "${{ env.OUT_DIR }}" -name "*.ko" 2>/dev/null | wc -l
+          
+          echo ""
+          echo "===== .ko 模块列表（前 30 个）====="
+          find "${{ env.OUT_DIR }}" -name "*.ko" 2>/dev/null | head -30
+          
+          echo ""
+          echo "===== Image 文件大小 ====="
+          ls -lh "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" 2>/dev/null || echo "Image 不存在"
 
-      - name: Upload artifacts
+      # 8. ★★★ 核心打包逻辑：制作 AnyKernel3 可刷入 ZIP ★★★
+      - name: 打包为 AnyKernel3 刷机包 (专属 Odin)
+        run: |
+          # 定义内核镜像路径
+          IMAGE_PATH="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+          
+          # 8.1 克隆 AnyKernel3 官方模板
+          git clone -b "${{ env.AK3_BRANCH }}" "${{ env.AK3_REPO }}" AnyKernel3
+          cd AnyKernel3
+
+          # 8.2 【专属配置】修改 anykernel.sh 以适配 Odin
+          # 关闭设备型号强制校验 -> 允许通刷 boot 分区
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          # 自动探测分区路径 (不再写死 /dev/block/...)
+          sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' anykernel.sh
+          # 自动识别 A/B 槽位 (Odin 是 A/B 分区设备)
+          sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' anykernel.sh
+
+          # 8.3 复制编译好的 Image
+          if [ -f "$IMAGE_PATH" ]; then
+            cp -f "$IMAGE_PATH" Image
+            echo "✅ 成功复制 Image 内核文件"
+          else
+            echo "❌ 错误: 未找到 Image 文件，打包终止！"
+            exit 1
+          fi
+
+          # 8.4 【Odin 特化处理】跳过 dtbo 和 .ko 模块
+          # 原因: QGKI 5.4 全内联编译，驱动已在 Image 内，dtbo 由 boot.img 统一管理，无需额外打包。
+          echo "ℹ️ Odin 使用全内联模式，跳过 dtbo 和 modules 复制。"
+
+          # 8.5 打包为 ZIP
+          zip -r9 "../${{ env.DEVICE_CODENAME }}-kernel-${{ github.run_number }}.zip" ./* -x "*.git*" "README.md"
+          cd ..
+
+          echo "✅ 刷机包生成完毕: ${{ env.DEVICE_CODENAME }}-kernel-${{ github.run_number }}.zip"
+
+      # 9. 收集并上传产物
+      - name: 上传最终刷机包与编译日志
         uses: actions/upload-artifact@v4
         with:
-          name: odin-kernel-${{ github.run_number }}
-          path: artifacts/
+          name: odin-kernel-flashable-${{ github.run_number }}
+          path: |
+            *.zip
+            build.log
           retention-days: 14
-          if-no-files-found: warn
+          if-no-files-found: error
