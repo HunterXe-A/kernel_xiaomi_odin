@@ -1,60 +1,148 @@
 name: Build Xiaomi Mix 4 (odin) QGKI Kernel
 
-on: [push, workflow_dispatch]   # 根据实际需求调整触发条件
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Defconfig 文件名"
+        required: true
+        default: "odin_defconfig"
+      ndk_version:
+        description: "Android NDK 版本 (tag, 如 r29)"
+        required: true
+        default: "r29"
+  push:
+    branches:
+      - main
+      - lineage-23.2
+    paths:
+      - "arch/arm64/configs/odin_defconfig"
+      - ".github/workflows/build-kernel.yml"
 
 env:
-  KERNEL_DIR: kernel
-  OUT_DIR: out
-  ARCH: arm64
-  DEVICE_CODENAME: odin
-  AK3_REPO: https://github.com/osm0sis/AnyKernel3
-  AK3_BRANCH: master
+  # 设备专属标识
+  DEVICE_CODENAME: "odin"
+  DEVICE_NAME: "Xiaomi Mix 4"
+  
+  # 编译路径与架构
+  KERNEL_DIR: "kernel"
+  OUT_DIR: "out"
+  ARCH: "arm64"
+  SUBARCH: "arm64"
+  
+  # 工具链（使用官方 NDK）
+  NDK_VERSION: "r29"
+  
+  # 【打包核心】直接硬编码为全内联模式（Odin 的 QGKI 特性）
+  PACK_METHOD: "Anykernel3"
+  AK3_REPO: "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_BRANCH: "master"
 
 jobs:
   build:
+    name: 编译 Odin 内核 (QGKI 5.4)
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
-      - name: 检出代码
+      # 1. 释放磁盘空间（避免 GitHub  Runner 空间不足）
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker system prune -af || true
+          df -h /
+
+      # 2. 检出内核源码
+      - name: 检出内核源码 (depth=1)
         uses: actions/checkout@v4
+        with:
+          path: ${{ env.KERNEL_DIR }}
+          fetch-depth: 1
 
-      # 其他前置步骤（如安装依赖、编译工具链等）请自行补充
+      # 3. 安装编译依赖
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex libelf-dev libssl-dev libncurses-dev \
+            build-essential zip unzip curl device-tree-compiler \
+            python3 rsync p7zip-full
 
+      # 4. 下载 Android NDK (Clang 工具链)
+      - name: 下载 Android NDK (${{ github.event.inputs.ndk_version || env.NDK_VERSION }})
+        env:
+          NDK_VER: ${{ github.event.inputs.ndk_version || env.NDK_VERSION }}
+        run: |
+          URL="https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
+          echo "下载地址: $URL"
+          curl -fL --retry 3 -o ndk.zip "$URL"
+          unzip -q ndk.zip
+          rm -f ndk.zip
+          # 统一重命名为 ndk 目录
+          mv "android-ndk-${NDK_VER}" ndk
+          # 添加 Clang 到 PATH
+          CLANG_PATH="${{ github.workspace }}/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$CLANG_PATH" >> "$GITHUB_PATH"
+          echo "NDK 大小:"
+          du -sh ndk
+
+      - name: 验证 Clang 版本
+        run: clang --version
+
+      # 5. 创建输出目录
+      - name: 准备输出目录
+        run: mkdir -p "${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}"
+
+      # 6. 生成 defconfig
+      - name: 生成 defconfig
+        working-directory: ${{ env.KERNEL_DIR }}
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig || 'odin_defconfig' }}
+        run: |
+          make -j"$(nproc)" \
+            O="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}" \
+            ARCH="${{ env.ARCH }}" \
+            SUBARCH="${{ env.SUBARCH }}" \
+            HOSTCC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            "$DEFCONFIG"
+
+      # 7. 编译内核 (Image, dtb 等)
       - name: 编译内核
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           make -j"$(nproc)" \
             O="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
+            SUBARCH="${{ env.SUBARCH }}" \
             LLVM=1 \
             LLVM_IAS=1 \
-            defconfig   # 请替换为实际使用的 defconfig 名称
-          make -j"$(nproc)" \
-            O="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}" \
-            ARCH="${{ env.ARCH }}" \
-            LLVM=1 \
-            LLVM_IAS=1
+            2>&1 | tee "${{ github.workspace }}/build.log"
 
-      - name: 检查编译产物
+      # 7.5 诊断：查看编译产物，确认是否需要打包 dtbo 和 .ko 模块
+      - name: 诊断编译产物
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          echo "===== boot 目录内容 ====="
+          echo "===== out/arch/arm64/boot/ 目录内容 ====="
           ls -la "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/" || echo "目录不存在"
-
+          
           echo ""
           echo "===== 是否存在 dtbo.img ====="
           find "${{ env.OUT_DIR }}" -iname "dtbo*" 2>/dev/null || echo "未找到 dtbo 相关文件"
-
+          
           echo ""
           echo "===== 是否存在独立 dtb 文件 ====="
           find "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot" -iname "*.dtb" 2>/dev/null | head -20
-
+          
           echo ""
           echo "===== 编译出的 .ko 模块数量 ====="
           find "${{ env.OUT_DIR }}" -name "*.ko" 2>/dev/null | wc -l
-
+          
           echo ""
           echo "===== .ko 模块列表（前 30 个）====="
           find "${{ env.OUT_DIR }}" -name "*.ko" 2>/dev/null | head -30
-
+          
           echo ""
           echo "===== Image 文件大小 ====="
           ls -lh "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" 2>/dev/null || echo "Image 不存在"
@@ -73,6 +161,9 @@ jobs:
           echo "===== 安装后的模块数量 ====="
           find "${{ github.workspace }}/modules_out" -name "*.ko" | wc -l
 
+      # 8.35 拼接 Image + dtb（原厂 boot.img 的 kernel 段是 Image+dtb 合并格式，
+      # 已通过 magiskboot unpack 解包真机 boot.img 验证：只有 kernel 段没有独立 dtb 文件，
+      # 且 kernel 段体积比纯 Image 大约 13.7MB，与 6 个 dtb 文件总和量级吻合）
       - name: 拼接 Image + dtb
         run: |
           IMAGE="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
@@ -95,28 +186,35 @@ jobs:
           echo "===== 拼接结果 ====="
           ls -lh "${{ github.workspace }}/Image-dtb"
 
+      # 8. ★★★ 核心打包逻辑：制作 AnyKernel3 可刷入 ZIP ★★★
       - name: 打包为 AnyKernel3 刷机包 (专属 Odin)
         run: |
-          # 克隆 AnyKernel3 官方模板
+          # 定义内核镜像路径
+          IMAGE_PATH="${{ github.workspace }}/${{ env.KERNEL_DIR }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+          
+          # 8.1 克隆 AnyKernel3 官方模板
           git clone -b "${{ env.AK3_BRANCH }}" "${{ env.AK3_REPO }}" AnyKernel3
           cd AnyKernel3
 
-          # 修改 anykernel.sh 以适配 Odin
+          # 8.2 【专属配置】修改 anykernel.sh 以适配 Odin
+          # 关闭设备型号强制校验 -> 允许通刷 boot 分区
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          # 自动探测分区路径 (不再写死 /dev/block/...)
           sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' anykernel.sh
+          # 自动识别 A/B 槽位 (Odin 是 A/B 分区设备)
           sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' anykernel.sh
           sed -i 's/do.modules=0/do.modules=1/g' anykernel.sh
 
-          # 复制拼接好的 Image-dtb 作为内核镜像
-          if [ -f "${{ github.workspace }}/Image-dtb" ]; then
+          # 8.3 复制编译好的 Image
+          if [ -f "$IMAGE_PATH" ]; then
             cp -f "${{ github.workspace }}/Image-dtb" Image
-            echo "✅ 成功复制 Image-dtb 内核文件"
+            echo "✅ 成功复制 Image 内核文件"
           else
-            echo "❌ 错误: 未找到 Image-dtb 文件，打包终止！"
+            echo "❌ 错误: 未找到 Image 文件，打包终止！"
             exit 1
           fi
 
-          # 收集 .ko 模块
+          # 8.4 收集 .ko 模块
           MODULES_SRC="${{ github.workspace }}/modules_out/lib/modules"
           if [ -d "$MODULES_SRC" ]; then
             mkdir -p modules/vendor/lib/modules
@@ -126,13 +224,14 @@ jobs:
             echo "❌ 错误: 未找到编译出的 .ko 模块！"
             exit 1
           fi
-
-          # 打包 ZIP
+          
+          # 8.5 打包为 ZIP
           zip -r9 "../${{ env.DEVICE_CODENAME }}-kernel-${{ github.run_number }}.zip" ./* -x "*.git*" "README.md"
           cd ..
 
           echo "✅ 刷机包生成完毕: ${{ env.DEVICE_CODENAME }}-kernel-${{ github.run_number }}.zip"
 
+      # 9. 收集并上传产物
       - name: 上传最终刷机包与编译日志
         uses: actions/upload-artifact@v4
         with:
