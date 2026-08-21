@@ -52,7 +52,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            git bc bison flex libssl-dev libncurses-dev \
+            git bc bison flex libelf-dev libssl-dev libncurses-dev \
             build-essential zip unzip curl device-tree-compiler \
             python3 rsync
 
@@ -90,7 +90,7 @@ jobs:
             O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
             SUBARCH="${{ env.SUBARCH }}" \
-            CC=clang \
+            HOSTCC=clang \
             LLVM=1 \
             LLVM_IAS=1 \
             "$DEFCONFIG"
@@ -102,11 +102,8 @@ jobs:
             O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
             SUBARCH="${{ env.SUBARCH }}" \
-            CC=clang \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             2>&1 | tee "${{ github.workspace }}/build.log"
 
       - name: Collect build artifacts
@@ -118,13 +115,6 @@ jobs:
             -exec cp -v {} artifacts/ \; || true
           cp -v build.log artifacts/ || true
           du -sh artifacts/
-
-      - name: Clean up build workspace
-        if: always()
-        run: |
-          # 编译中间产物（.o/.ko/vmlinux 调试符号等）体积很大，成品已收集到 artifacts/，
-          # 及时清理避免占用 runner 磁盘、加快后续步骤。
-          rm -rf "${{ env.OUT_DIR }}" "${{ env.KERNEL_DIR }}" "${{ env.CLANG_DIR }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
