@@ -24,6 +24,7 @@ env:
   OUT_DIR: out
   ARCH: arm64
   SUBARCH: arm64
+  CLANG_VERSION: clang-r574158
 
 jobs:
   build:
@@ -34,8 +35,12 @@ jobs:
     steps:
       - name: Free up disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
           sudo docker system prune -af || true
+          df -h /
 
       - name: Checkout kernel source (depth=1)
         uses: actions/checkout@v4
@@ -47,36 +52,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            git ccache automake flex lzop bison gperf build-essential \
-            zip curl zlib1g-dev libncurses-dev gawk openssl libssl-dev \
-            bc squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool \
-            make optipng maven libssl-dev pwgen libswitch-perl policycoreutils \
-            minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 \
-            lib32ncurses-dev x11proto-core-dev libx11-dev lib32z1-dev \
-            libgl1-mesa-dev xsltproc unzip device-tree-compiler python3
+            git bc bison flex libssl-dev libncurses-dev \
+            build-essential zip unzip curl device-tree-compiler \
+            python3 rsync
 
-      - name: Download AOSP clang (${{ github.event.inputs.clang_version || 'clang-r574158' }}) via wget
+      - name: Download AOSP clang (${{ github.event.inputs.clang_version || env.CLANG_VERSION }})
         env:
-          # clang-r574158 位于分支 mirror-goog-main-llvm-toolchain-source 下的同名子目录，
-          # 不是独立分支，因此不能用 git clone -b <version> 直接拉取。
-          # 改用 Gitiles 内置的 +archive 端点，按子目录名精确打包下载 tar.gz，
-          # 无需 git clone 整个 clang prebuilt 仓库（该仓库历史巨大）。
-          CLANG_VER: ${{ github.event.inputs.clang_version || 'clang-r574158' }}
-          CLANG_BRANCH: mirror-goog-main-llvm-toolchain-source
+          # AOSP clang prebuilt 仓库里所有版本都在同一分支（main）下，
+          # 按版本号分成不同子目录（例如 clang-r574158/），不是独立分支。
+          # 用 git clone --depth=1 + sparse-checkout 只拉取需要的那个子目录，
+          # 避免下载整个仓库（历史巨大、包含全部历史版本的 clang 二进制）。
+          CLANG_VER: ${{ github.event.inputs.clang_version || env.CLANG_VERSION }}
         run: |
-          mkdir -p "${{ env.CLANG_DIR }}"
-          url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH}/${CLANG_VER}.tar.gz"
-          echo "Downloading: $url"
-          wget --no-verbose -O clang.tar.gz "$url"
-          tar -xzf clang.tar.gz -C "${{ env.CLANG_DIR }}"
-          rm -f clang.tar.gz
-          chmod -R +x "${{ env.CLANG_DIR }}/bin"
-          echo "${{ github.workspace }}/${{ env.CLANG_DIR }}/bin" >> "$GITHUB_PATH"
+          git clone --filter=blob:none --no-checkout --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            "${{ env.CLANG_DIR }}"
+          cd "${{ env.CLANG_DIR }}"
+          git sparse-checkout init --cone
+          git sparse-checkout set "$CLANG_VER"
+          git checkout
+          cd ..
+          chmod -R +x "${{ env.CLANG_DIR }}/${CLANG_VER}/bin"
+          echo "${{ github.workspace }}/${{ env.CLANG_DIR }}/${CLANG_VER}/bin" >> "$GITHUB_PATH"
+          # sparse-checkout 的 .git 元数据本身也占空间（含 pack 索引等），编译不需要，直接删掉
+          rm -rf "${{ env.CLANG_DIR }}/.git"
+          du -sh "${{ env.CLANG_DIR }}/${CLANG_VER}"
 
       - name: Show toolchain version
-        run: |
-          export PATH="${{ github.workspace }}/${{ env.CLANG_DIR }}/bin:$PATH"
-          clang --version
+        run: clang --version
 
       - name: Prepare output directory
         run: mkdir -p "${{ env.OUT_DIR }}"
@@ -86,7 +89,6 @@ jobs:
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig || 'odin_defconfig' }}
         run: |
-          export PATH="${{ github.workspace }}/${{ env.CLANG_DIR }}/bin:$PATH"
           make -j"$(nproc)" \
             O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
@@ -99,7 +101,6 @@ jobs:
       - name: Build kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          export PATH="${{ github.workspace }}/${{ env.CLANG_DIR }}/bin:$PATH"
           make -j"$(nproc)" \
             O="${{ github.workspace }}/${{ env.OUT_DIR }}" \
             ARCH="${{ env.ARCH }}" \
@@ -119,6 +120,14 @@ jobs:
             \( -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' \) \
             -exec cp -v {} artifacts/ \; || true
           cp -v build.log artifacts/ || true
+          du -sh artifacts/
+
+      - name: Clean up build workspace
+        if: always()
+        run: |
+          # 编译中间产物（.o/.ko/vmlinux 调试符号等）体积很大，成品已收集到 artifacts/，
+          # 及时清理避免占用 runner 磁盘、加快后续步骤。
+          rm -rf "${{ env.OUT_DIR }}" "${{ env.KERNEL_DIR }}" "${{ env.CLANG_DIR }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
