@@ -7,10 +7,10 @@ on:
         description: "defconfig 文件名（位于 arch/arm64/configs/ 下）"
         required: true
         default: "odin_defconfig"
-      clang_version:
-        description: "AOSP clang 版本目录名（mirror-goog-main-llvm-toolchain-source 分支下的子目录）"
+      ndk_version:
+        description: "Android NDK 版本号（对应 GitHub Releases 的 tag，如 r29、r28c）"
         required: true
-        default: "clang-r574158"
+        default: "r29"
   push:
     branches:
       - lineage-23.2
@@ -20,11 +20,11 @@ on:
 
 env:
   KERNEL_DIR: kernel
-  CLANG_DIR: clang
+  NDK_DIR: ndk
   OUT_DIR: out
   ARCH: arm64
   SUBARCH: arm64
-  CLANG_VERSION: clang-r574158
+  NDK_VERSION: r29
 
 jobs:
   build:
@@ -56,27 +56,24 @@ jobs:
             build-essential zip unzip curl device-tree-compiler \
             python3 rsync
 
-      - name: Download AOSP clang (${{ github.event.inputs.clang_version || env.CLANG_VERSION }})
+      - name: Download Android NDK (${{ github.event.inputs.ndk_version || env.NDK_VERSION }})
         env:
-          # AOSP clang prebuilt 仓库里所有版本都在同一分支（main）下，
-          # 按版本号分成不同子目录（例如 clang-r574158/），不是独立分支。
-          # 用 git clone --depth=1 + sparse-checkout 只拉取需要的那个子目录，
-          # 避免下载整个仓库（历史巨大、包含全部历史版本的 clang 二进制）。
-          CLANG_VER: ${{ github.event.inputs.clang_version || env.CLANG_VERSION }}
+          # 改用 Android NDK 官方 GitHub Releases 对应的 dl.google.com 直链下载完整包，
+          # 这是 Google 官方稳定发布、版本号明确、可反复验证的下载方式，
+          # 不依赖 AOSP 内部仓库的分支/目录结构（之前在那上面踩过坑）。
+          # 参考: https://github.com/android/ndk/releases
+          NDK_VER: ${{ github.event.inputs.ndk_version || env.NDK_VERSION }}
         run: |
-          git clone --filter=blob:none --no-checkout --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            "${{ env.CLANG_DIR }}"
-          cd "${{ env.CLANG_DIR }}"
-          git sparse-checkout init --cone
-          git sparse-checkout set "$CLANG_VER"
-          git checkout
-          cd ..
-          chmod -R +x "${{ env.CLANG_DIR }}/${CLANG_VER}/bin"
-          echo "${{ github.workspace }}/${{ env.CLANG_DIR }}/${CLANG_VER}/bin" >> "$GITHUB_PATH"
-          # sparse-checkout 的 .git 元数据本身也占空间（含 pack 索引等），编译不需要，直接删掉
-          rm -rf "${{ env.CLANG_DIR }}/.git"
-          du -sh "${{ env.CLANG_DIR }}/${CLANG_VER}"
+          url="https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
+          echo "Downloading: $url"
+          curl -fL --retry 3 -o ndk.zip "$url"
+          unzip -q ndk.zip
+          rm -f ndk.zip
+          # 解压后目录名固定为 android-ndk-<版本号>，统一重命名方便后续引用
+          mv "android-ndk-${NDK_VER}" "${{ env.NDK_DIR }}"
+          CLANG_BIN="${{ github.workspace }}/${{ env.NDK_DIR }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          du -sh "${{ env.NDK_DIR }}"
 
       - name: Show toolchain version
         run: clang --version
