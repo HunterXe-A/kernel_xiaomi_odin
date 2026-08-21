@@ -17,7 +17,7 @@ on:
       - lineage-23.2
     paths:
       - "arch/arm64/configs/odin_defconfig"
-      - ".github/workflows/build-odin-kernel.yml"
+      - ".github/workflows/build-kernel.yml"
 
 env:
   # 设备专属标识
