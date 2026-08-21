@@ -8,7 +8,7 @@ on:
         required: true
         default: "odin_defconfig"
       clang_version:
-        description: "AOSP clang 版本目录名"
+        description: "AOSP clang 版本目录名（mirror-goog-main-llvm-toolchain-source 分支下的子目录）"
         required: true
         default: "clang-r574158"
   push:
@@ -55,13 +55,22 @@ jobs:
             lib32ncurses-dev x11proto-core-dev libx11-dev lib32z1-dev \
             libgl1-mesa-dev xsltproc unzip device-tree-compiler python3
 
-      - name: Download AOSP clang (${{ github.event.inputs.clang_version || 'clang-r574158' }}), depth=1
+      - name: Download AOSP clang (${{ github.event.inputs.clang_version || 'clang-r574158' }}) via wget
         env:
+          # clang-r574158 位于分支 mirror-goog-main-llvm-toolchain-source 下的同名子目录，
+          # 不是独立分支，因此不能用 git clone -b <version> 直接拉取。
+          # 改用 Gitiles 内置的 +archive 端点，按子目录名精确打包下载 tar.gz，
+          # 无需 git clone 整个 clang prebuilt 仓库（该仓库历史巨大）。
           CLANG_VER: ${{ github.event.inputs.clang_version || 'clang-r574158' }}
+          CLANG_BRANCH: mirror-goog-main-llvm-toolchain-source
         run: |
-          git clone --depth=1 -b "$CLANG_VER" \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            "${{ env.CLANG_DIR }}"
+          mkdir -p "${{ env.CLANG_DIR }}"
+          url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH}/${CLANG_VER}.tar.gz"
+          echo "Downloading: $url"
+          wget --no-verbose -O clang.tar.gz "$url"
+          tar -xzf clang.tar.gz -C "${{ env.CLANG_DIR }}"
+          rm -f clang.tar.gz
+          chmod -R +x "${{ env.CLANG_DIR }}/bin"
           echo "${{ github.workspace }}/${{ env.CLANG_DIR }}/bin" >> "$GITHUB_PATH"
 
       - name: Show toolchain version
